@@ -59,7 +59,7 @@ def has_admin_role():
         user_role_names = [role.name for role in interaction.user.roles]
 
         # サーバーオーナー（所有者）はロールに関わらず常に許可したい場合は以下のコメントアウトを解除
-        if interaction.guild and interaction.user.id == interaction.guild.owner_id:
+        # if interaction.guild and interaction.user.id == interaction.guild.owner_id:
         #     return True
 
         if ADMIN_ROLE_NAME in user_role_names:
