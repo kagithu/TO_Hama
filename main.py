@@ -49,6 +49,7 @@ ADMIN_ROLE_NAME = "スーパーモデレーター"
 DEFAULT_CONFIG = {
     "max_points": 3,
     "timeout_minutes": 10,
+    "timeout_multiplier": 2.0,  # TO重なるごとの倍率 (1.0で固定長、2.0で2倍化)
     "notify_channel_id": None,
     "notify_enabled": True,
     "exempt_role_name": "スーパーモデレーター",
@@ -58,10 +59,10 @@ DEFAULT_CONFIG = {
 # 回避に使われやすいノイズ記号・スペースのリスト
 IGNORE_CHARS = [
     " ",
+    " ",
     "。",
-    "、",
-    "◯",
-    "　",
+    "、"
+    "〇",
     "_",
     "-",
     ".",
@@ -244,7 +245,8 @@ async def on_message(message):
     user_points = load_json(POINTS_FILE, {})
 
     max_points = config.get("max_points", 3)
-    timeout_minutes = config.get("timeout_minutes", 5)
+    base_minutes = config.get("timeout_minutes", 5)
+    multiplier = config.get("timeout_multiplier", 2.0)
 
     # --- NGワード判定 ---
     cleaned_message = clean_text(message.content)
@@ -279,13 +281,27 @@ async def on_message(message):
 
         # 規定回数ごとのタイムアウト処理
         if total_points % max_points == 0:
-            duration = datetime.timedelta(minutes=timeout_minutes)
+            # ★ タイムアウト回数（1回目, 2回目, 3回目...）
+            timeout_count = total_points // max_points
+
+            # 時間計算: 基本時間 * (倍率 ^ (通算TO回数 - 1))
+            # 例 (初期値5分, 倍率2.0の場合):
+            # 1回目 (3違反): 5 * (2^0) = 5分
+            # 2回目 (6違反): 5 * (2^1) = 10分
+            # 3回目 (9違反): 5 * (2^2) = 20分
+            calc_minutes = int(base_minutes * (multiplier ** (timeout_count - 1)))
+
+            # Discordの上限は28日間（40,320分）
+            calc_minutes = min(calc_minutes, 40320)
+
+            duration = datetime.timedelta(minutes=calc_minutes)
             try:
                 await message.author.timeout(
-                    duration, reason="NGワード規定回数到達"
+                    duration, reason=f"NGワード通算{total_points}回到達（TO: {timeout_count}回目）"
                 )
                 await message.channel.send(
-                    f"⚠️ {message.author.mention} が通算 {total_points} 回目の違反に達したため、{timeout_minutes}分間タイムアウトされました。"
+                    f"⚠️ {message.author.mention} が通算 {total_points} 回目の違反に達しました。\n"
+                    f"（TO通算 {timeout_count} 回目のため、**{calc_minutes}分間** タイムアウトされました）"
                 )
             except discord.errors.Forbidden:
                 await message.channel.send(
@@ -531,28 +547,40 @@ async def toggle_notify(interaction: discord.Interaction, enable: bool):
     )
 
 
-# --- タイムアウト基準設定 ---
+# --- タイムアウト基準・倍率設定 ---
 @bot.tree.command(
     name="set_timeout_rules",
-    description="【管理者専用】タイムアウトまでの違反間隔（何回ごと）と禁止時間を設定します",
+    description="【管理者専用】タイムアウトまでの違反間隔、基本時間、重ねがけ倍率を設定します",
 )
 @has_admin_role()
 async def set_timeout_rules(
-    interaction: discord.Interaction, max_points: int, minutes: int
+    interaction: discord.Interaction,
+    max_points: int,
+    minutes: int,
+    multiplier: float = 2.0,
 ):
-    if max_points <= 0 or minutes <= 0:
+    if max_points <= 0 or minutes <= 0 or multiplier < 1.0:
         await interaction.response.send_message(
-            "回数と時間は1以上の数字を指定してください。", ephemeral=True
+            "回数・時間は1以上、倍率は1.0以上（2倍にするなら2.0）を指定してください。",
+            ephemeral=True,
         )
         return
 
     config = get_config()
     config["max_points"] = max_points
     config["timeout_minutes"] = minutes
+    config["timeout_multiplier"] = multiplier
     save_json(CONFIG_FILE, config)
 
+    mult_text = (
+        f"{multiplier}倍（重ねるごとに拡大）" if multiplier > 1.0 else "等倍（毎回固定）"
+    )
+
     await interaction.response.send_message(
-        f"⚙️ 設定を変更しました：\n・ **タイムアウト発生サイクル:** {max_points}回ごと（例: {max_points}回, {max_points*2}回...）\n・ **タイムアウト時間:** {minutes}分間",
+        f"⚙️ タイムアウト設定を変更しました：\n"
+        f"・ **トリガーサイクル:** {max_points}回ごと（例: {max_points}回, {max_points*2}回...）\n"
+        f"・ **初回タイムアウト時間:** {minutes}分間\n"
+        f"・ **重ねがけ倍率:** {mult_text}",
         ephemeral=True,
     )
 
@@ -578,10 +606,14 @@ async def show_config(interaction: discord.Interaction):
     else:
         blocked_mentions = "なし"
 
+    multiplier = config.get("timeout_multiplier", 2.0)
+    mult_str = f"{multiplier} 倍" if multiplier > 1.0 else "なし (固定)"
+
     msg = (
         f"⚙️ **現在の設定状況:**\n"
         f"・ **タイムアウト発生基準:** {config.get('max_points', 3)} 回ごと（3回, 6回, 9回...）\n"
-        f"・ **タイムアウト時間:** {config.get('timeout_minutes', 5)} 分間\n"
+        f"・ **初回タイムアウト時間:** {config.get('timeout_minutes', 5)} 分間\n"
+        f"・ **重ねがけ倍率:** {mult_str}\n"
         f"・ **免除対象の役職:** `{exempt_role}`\n"
         f"・ **個別ブロックユーザー:** {blocked_mentions}\n"
         f"・ **通知チャンネル:** {channel_mention}\n"
