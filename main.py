@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 from threading import Thread
+import unicodedata
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -46,16 +47,65 @@ ADMIN_ROLE_NAME = "スーパーモデレーター"
 
 # デフォルト設定値
 DEFAULT_CONFIG = {
-    "max_points": 3,  # 何回ごとにタイムアウトするか（例: 3回ごと）
-    "timeout_minutes": 5,
+    "max_points": 3,
+    "timeout_minutes": 10,
     "notify_channel_id": None,
     "notify_enabled": True,
     "exempt_role_name": "VIP",
 }
 
+# 回避に使われやすいノイズ記号・スペースのリスト
+IGNORE_CHARS = [
+    " ",
+    "　",
+    " ",
+    "_",
+    "ー",
+    "-",
+    ".",
+    ",",
+    "/",
+    "・",
+    "★",
+    "☆",
+    "〜",
+    "~",
+    "!",
+    "?",
+    "│",
+    "|",
+]
+
 
 # ==========================================
-# 3. カスタム権限チェック（管理者ロール判定）
+# 3. テキスト前処理（正規表現不使用の対策）
+# ==========================================
+def clean_text(text: str) -> str:
+    """大文字小文字・全角半角・ひらがなカタカナ・記号挟みを統一・除去する関数"""
+    if not text:
+        return ""
+
+    # 1. 全角英数・記号を半角化 ＆ 大文字を小文字化
+    text = unicodedata.normalize("NFKC", text).lower()
+
+    # 2. ひらがなをカタカナに統一（Unicodeのコードポイントの差分を利用）
+    katakana_chars = []
+    for ch in text:
+        if "ぁ" <= ch <= "ん":
+            katakana_chars.append(chr(ord(ch) + 0x60))
+        else:
+            katakana_chars.append(ch)
+    text = "".join(katakana_chars)
+
+    # 3. 無視する記号やスペースの除去
+    for char in IGNORE_CHARS:
+        text = text.replace(char, "")
+
+    return text
+
+
+# ==========================================
+# 4. カスタム権限チェック（管理者ロール判定）
 # ==========================================
 def has_admin_role():
     """管理用コマンドの実行権限をチェック"""
@@ -74,7 +124,7 @@ def has_admin_role():
 
 
 # ==========================================
-# 4. JSONファイル操作用のヘルパー関数
+# 5. JSONファイル操作用のヘルパー関数
 # ==========================================
 def load_json(filepath, default_value):
     if not os.path.exists(filepath):
@@ -147,7 +197,7 @@ async def send_ng_list_update(guild: discord.Guild, title_text: str):
 
 
 # ==========================================
-# 5. Botのイベント処理
+# 6. Botのイベント処理
 # ==========================================
 @bot.event
 async def on_ready():
@@ -188,8 +238,16 @@ async def on_message(message):
     max_points = config.get("max_points", 3)
     timeout_minutes = config.get("timeout_minutes", 5)
 
-    # NGワード判定
-    contains_ng_word = any(ng_word in message.content for ng_word in ng_words)
+    # --- NGワード判定（強化版）---
+    cleaned_message = clean_text(message.content)
+    contains_ng_word = False
+
+    for ng_word in ng_words:
+        cleaned_ng = clean_text(ng_word)
+        # 前処理したメッセージ内に、前処理したNGワードが含まれるか判定
+        if cleaned_ng and cleaned_ng in cleaned_message:
+            contains_ng_word = True
+            break
 
     if contains_ng_word:
         user_id = str(message.author.id)
@@ -233,7 +291,7 @@ async def on_message(message):
 
 
 # ==========================================
-# 6. スラッシュコマンド機能
+# 7. スラッシュコマンド機能
 # ==========================================
 
 
@@ -466,7 +524,7 @@ async def show_config(interaction: discord.Interaction):
 
 
 # ==========================================
-# 7. エラーハンドラー
+# 8. エラーハンドラー
 # ==========================================
 @add_ng_word.error
 @remove_ng_word.error
@@ -493,7 +551,7 @@ async def admin_command_error(
 
 
 # ==========================================
-# 8. プログラムの実行
+# 9. プログラムの実行
 # ==========================================
 if __name__ == "__main__":
     TOKEN = os.getenv("DISCORD_BOT_TOKEN")
