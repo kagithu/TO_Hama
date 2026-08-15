@@ -51,18 +51,18 @@ DEFAULT_CONFIG = {
     "timeout_minutes": 10,
     "notify_channel_id": None,
     "notify_enabled": True,
-    "exempt_role_name": "VIP",
+    "exempt_role_name": "スーパーモデレーター",
+    "block_user_ids": [],  # 個別ブロック対象のユーザーIDリスト
 }
 
 # 回避に使われやすいノイズ記号・スペースのリスト
 IGNORE_CHARS = [
     " ",
-    "、",
     "。",
+    "、",
+    "◯",
     "　",
-    " ",
     "_",
-    "ー",
     "-",
     ".",
     ",",
@@ -222,17 +222,23 @@ async def on_message(message):
 
     config = get_config()
 
-    # 免除ロールまたは管理者ロールを持っているユーザーはスキップ
+    # 個別ブロック対象リストを取得
+    block_user_ids = config.get("block_user_ids", [])
+    is_individually_blocked = message.author.id in block_user_ids
+
+    # 免除ロール判定（ただし個別ブロック対象ユーザーは免除させない）
     if isinstance(message.author, discord.Member):
         exempt_role_name = config.get("exempt_role_name", "VIP")
         user_role_names = [role.name for role in message.author.roles]
 
-        if (
-            exempt_role_name in user_role_names
-            or ADMIN_ROLE_NAME in user_role_names
-        ):
-            await bot.process_commands(message)
-            return
+        # 管理者または免除ロール保持者で、かつ個別ブロックされていない場合はスキップ
+        if not is_individually_blocked:
+            if (
+                exempt_role_name in user_role_names
+                or ADMIN_ROLE_NAME in user_role_names
+            ):
+                await bot.process_commands(message)
+                return
 
     ng_words = load_json(NG_WORDS_FILE, [])
     user_points = load_json(POINTS_FILE, {})
@@ -240,13 +246,12 @@ async def on_message(message):
     max_points = config.get("max_points", 3)
     timeout_minutes = config.get("timeout_minutes", 5)
 
-    # --- NGワード判定（強化版）---
+    # --- NGワード判定 ---
     cleaned_message = clean_text(message.content)
     contains_ng_word = False
 
     for ng_word in ng_words:
         cleaned_ng = clean_text(ng_word)
-        # 前処理したメッセージ内に、前処理したNGワードが含まれるか判定
         if cleaned_ng and cleaned_ng in cleaned_message:
             contains_ng_word = True
             break
@@ -254,7 +259,7 @@ async def on_message(message):
     if contains_ng_word:
         user_id = str(message.author.id)
 
-        # 累計回数を加算（リセットせず増やし続ける）
+        # 累計回数を加算
         total_points = user_points.get(user_id, 0) + 1
         user_points[user_id] = total_points
         save_json(POINTS_FILE, user_points)
@@ -272,7 +277,7 @@ async def on_message(message):
             delete_after=5,
         )
 
-        # max_pointsの倍数（例: 3回目, 6回目, 9回目...）のタイミングでタイムアウト実行
+        # 規定回数ごとのタイムアウト処理
         if total_points % max_points == 0:
             duration = datetime.timedelta(minutes=timeout_minutes)
             try:
@@ -295,6 +300,60 @@ async def on_message(message):
 # ==========================================
 # 7. スラッシュコマンド機能
 # ==========================================
+
+
+# --- 個別ブロック指定の追加 ---
+@bot.tree.command(
+    name="block_user",
+    description="【管理者専用】免除ロールを持っていても個別にNGワード検知対象にするユーザーを指定します",
+)
+@has_admin_role()
+async def block_user(interaction: discord.Interaction, user: discord.Member):
+    config = get_config()
+    block_list = config.get("block_user_ids", [])
+
+    if user.id in block_list:
+        await interaction.response.send_message(
+            f"{user.mention} さんは既に個別ブロック対象に登録されています。",
+            ephemeral=True,
+        )
+        return
+
+    block_list.append(user.id)
+    config["block_user_ids"] = block_list
+    save_json(CONFIG_FILE, config)
+
+    await interaction.response.send_message(
+        f"🚫 {user.mention} さんを個別ブロック対象に指定しました。（免除ロールを持っていても検知されます）",
+        ephemeral=True,
+    )
+
+
+# --- 個別ブロック指定の解除 ---
+@bot.tree.command(
+    name="unblock_user",
+    description="【管理者専用】ユーザーの個別ブロック指定を解除します",
+)
+@has_admin_role()
+async def unblock_user(interaction: discord.Interaction, user: discord.Member):
+    config = get_config()
+    block_list = config.get("block_user_ids", [])
+
+    if user.id not in block_list:
+        await interaction.response.send_message(
+            f"{user.mention} さんは個別ブロック対象に登録されていません。",
+            ephemeral=True,
+        )
+        return
+
+    block_list.remove(user.id)
+    config["block_user_ids"] = block_list
+    save_json(CONFIG_FILE, config)
+
+    await interaction.response.send_message(
+        f"✅ {user.mention} さんの個別ブロック指定を解除しました。",
+        ephemeral=True,
+    )
 
 
 # --- 【一般用】自分の通算警告回数を確認 ---
@@ -513,11 +572,18 @@ async def show_config(interaction: discord.Interaction):
     )
     exempt_role = config.get("exempt_role_name", "未設定")
 
+    block_user_ids = config.get("block_user_ids", [])
+    if block_user_ids:
+        blocked_mentions = " ".join([f"<@{uid}>" for uid in block_user_ids])
+    else:
+        blocked_mentions = "なし"
+
     msg = (
         f"⚙️ **現在の設定状況:**\n"
         f"・ **タイムアウト発生基準:** {config.get('max_points', 3)} 回ごと（3回, 6回, 9回...）\n"
         f"・ **タイムアウト時間:** {config.get('timeout_minutes', 5)} 分間\n"
         f"・ **免除対象の役職:** `{exempt_role}`\n"
+        f"・ **個別ブロックユーザー:** {blocked_mentions}\n"
         f"・ **通知チャンネル:** {channel_mention}\n"
         f"・ **自動通知機能:** {notify_status}"
     )
@@ -538,6 +604,8 @@ async def show_config(interaction: discord.Interaction):
 @show_config.error
 @check_points.error
 @reset_points.error
+@block_user.error
+@unblock_user.error
 async def admin_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ):
