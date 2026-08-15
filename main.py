@@ -42,11 +42,11 @@ POINTS_FILE = "user_points.json"
 CONFIG_FILE = "config.json"
 
 # ★ Bot管理用コマンドを実行できるロール名
-ADMIN_ROLE_NAME = "スーパーモデレーター","モデレーター"
+ADMIN_ROLE_NAME = "モデレーター"
 
 # デフォルト設定値
 DEFAULT_CONFIG = {
-    "max_points": 3,
+    "max_points": 3,  # 何回ごとにタイムアウトするか（例: 3回ごと）
     "timeout_minutes": 5,
     "notify_channel_id": None,
     "notify_enabled": True,
@@ -109,7 +109,6 @@ def get_config():
     return config
 
 
-# ★ 通知送信バグ修正版関数
 async def send_ng_list_update(guild: discord.Guild, title_text: str):
     config = get_config()
     if not config.get("notify_enabled", True):
@@ -119,7 +118,6 @@ async def send_ng_list_update(guild: discord.Guild, title_text: str):
     if not channel_id:
         return
 
-    # IDをint型にキャストして確実にチャンネルを取得（キャッシュにない場合はfetch）
     try:
         channel_id_int = int(channel_id)
         channel = guild.get_channel(channel_id_int)
@@ -196,8 +194,9 @@ async def on_message(message):
     if contains_ng_word:
         user_id = str(message.author.id)
 
-        current_points = user_points.get(user_id, 0) + 1
-        user_points[user_id] = current_points
+        # 累計回数を加算（リセットせず増やし続ける）
+        total_points = user_points.get(user_id, 0) + 1
+        user_points[user_id] = total_points
         save_json(POINTS_FILE, user_points)
 
         try:
@@ -207,19 +206,21 @@ async def on_message(message):
         except discord.errors.HTTPException:
             pass
 
+        # 検出時に通算（累計）回数を表示
         await message.channel.send(
-            f"{message.author.mention} 不適切なワードを検知しました。（累積: {current_points}/{max_points}回）",
+            f"{message.author.mention} 不適切なワードを検知しました。（通算: {total_points}回目）",
             delete_after=5,
         )
 
-        if current_points >= max_points:
+        # max_pointsの倍数（例: 3回目, 6回目, 9回目...）のタイミングでタイムアウト実行
+        if total_points % max_points == 0:
             duration = datetime.timedelta(minutes=timeout_minutes)
             try:
                 await message.author.timeout(
-                    duration, reason="NGワード規定回数超過"
+                    duration, reason="NGワード規定回数到達"
                 )
                 await message.channel.send(
-                    f"⚠️ {message.author.mention} が規定回数を超えたため、{timeout_minutes}分間タイムアウトされました。"
+                    f"⚠️ {message.author.mention} が通算 {total_points} 回目の違反に達したため、{timeout_minutes}分間タイムアウトされました。"
                 )
             except discord.errors.Forbidden:
                 await message.channel.send(
@@ -227,9 +228,6 @@ async def on_message(message):
                 )
             except Exception as e:
                 print(f"[Error] タイムアウトエラー: {e}")
-
-            user_points[user_id] = 0
-            save_json(POINTS_FILE, user_points)
 
     await bot.process_commands(message)
 
@@ -239,40 +237,34 @@ async def on_message(message):
 # ==========================================
 
 
-# --- 【一般用】自分の警告回数を確認 ---
+# --- 【一般用】自分の通算警告回数を確認 ---
 @bot.tree.command(
-    name="my_points", description="自分の現在の警告累積回数を確認します"
+    name="my_points", description="自分の現在の通算（累計）警告回数を確認します"
 )
 async def my_points(interaction: discord.Interaction):
     user_points = load_json(POINTS_FILE, {})
-    config = get_config()
-
     user_id = str(interaction.user.id)
-    current_points = user_points.get(user_id, 0)
-    max_points = config.get("max_points", 3)
+    total_points = user_points.get(user_id, 0)
 
     await interaction.response.send_message(
-        f"📊 {interaction.user.mention} さんの現在の警告累積回数は **{current_points} / {max_points} 回** です。",
-        ephemeral=True,  # 実行した本人のみ表示
+        f"📊 {interaction.user.mention} さんの通算警告回数は **{total_points} 回** です。",
+        ephemeral=True,
     )
 
 
-# --- 【管理者専用】他ユーザーの警告回数を確認 ---
+# --- 【管理者専用】他ユーザーの通算警告回数を確認 ---
 @bot.tree.command(
     name="check_points",
-    description="【管理者専用】指定したユーザーの警告累積回数を確認します",
+    description="【管理者専用】指定したユーザーの通算（累計）警告回数を確認します",
 )
 @has_admin_role()
 async def check_points(interaction: discord.Interaction, user: discord.Member):
     user_points = load_json(POINTS_FILE, {})
-    config = get_config()
-
     user_id = str(user.id)
-    current_points = user_points.get(user_id, 0)
-    max_points = config.get("max_points", 3)
+    total_points = user_points.get(user_id, 0)
 
     await interaction.response.send_message(
-        f"🔍 {user.mention} さんの現在の警告累積回数は **{current_points} / {max_points} 回** です。",
+        f"🔍 {user.mention} さんの通算警告回数は **{total_points} 回** です。",
         ephemeral=True,
     )
 
@@ -280,7 +272,7 @@ async def check_points(interaction: discord.Interaction, user: discord.Member):
 # --- 【管理者専用】警告回数をリセット ---
 @bot.tree.command(
     name="reset_points",
-    description="【管理者専用】指定したユーザーの警告累積回数を0にリセットします",
+    description="【管理者専用】指定したユーザーの通算警告回数を0にリセットします",
 )
 @has_admin_role()
 async def reset_points(interaction: discord.Interaction, user: discord.Member):
@@ -291,7 +283,7 @@ async def reset_points(interaction: discord.Interaction, user: discord.Member):
     save_json(POINTS_FILE, user_points)
 
     await interaction.response.send_message(
-        f"🔄 {user.mention} さんの警告累積回数を 0 回にリセットしました。",
+        f"🔄 {user.mention} さんの通算警告回数を 0 回にリセットしました。",
         ephemeral=True,
     )
 
@@ -423,7 +415,7 @@ async def toggle_notify(interaction: discord.Interaction, enable: bool):
 # --- タイムアウト基準設定 ---
 @bot.tree.command(
     name="set_timeout_rules",
-    description="【管理者専用】タイムアウトまでの違反回数と禁止時間を設定します",
+    description="【管理者専用】タイムアウトまでの違反間隔（何回ごと）と禁止時間を設定します",
 )
 @has_admin_role()
 async def set_timeout_rules(
@@ -441,7 +433,7 @@ async def set_timeout_rules(
     save_json(CONFIG_FILE, config)
 
     await interaction.response.send_message(
-        f"⚙️ 設定を変更しました：\n・ **違反回数基準:** {max_points}回\n・ **タイムアウト時間:** {minutes}分間",
+        f"⚙️ 設定を変更しました：\n・ **タイムアウト発生サイクル:** {max_points}回ごと（例: {max_points}回, {max_points*2}回...）\n・ **タイムアウト時間:** {minutes}分間",
         ephemeral=True,
     )
 
@@ -463,7 +455,7 @@ async def show_config(interaction: discord.Interaction):
 
     msg = (
         f"⚙️ **現在の設定状況:**\n"
-        f"・ **タイムアウト発生回数:** {config.get('max_points', 3)} 回\n"
+        f"・ **タイムアウト発生基準:** {config.get('max_points', 3)} 回ごと（3回, 6回, 9回...）\n"
         f"・ **タイムアウト時間:** {config.get('timeout_minutes', 5)} 分間\n"
         f"・ **免除対象の役職:** `{exempt_role}`\n"
         f"・ **通知チャンネル:** {channel_mention}\n"
