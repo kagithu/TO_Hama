@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     "timeout_minutes": 5,
     "notify_channel_id": None,
     "notify_enabled": True,
-    "exempt_role_name": "スーパーモデレーター",  # ★ NGワード検知を無視（免除）するデフォルトロール名
+    "exempt_role_name": "VIP",
 }
 
 
@@ -109,6 +109,7 @@ def get_config():
     return config
 
 
+# ★ 通知送信バグ修正版関数
 async def send_ng_list_update(guild: discord.Guild, title_text: str):
     config = get_config()
     if not config.get("notify_enabled", True):
@@ -118,7 +119,16 @@ async def send_ng_list_update(guild: discord.Guild, title_text: str):
     if not channel_id:
         return
 
-    channel = guild.get_channel(channel_id)
+    # IDをint型にキャストして確実にチャンネルを取得（キャッシュにない場合はfetch）
+    try:
+        channel_id_int = int(channel_id)
+        channel = guild.get_channel(channel_id_int)
+        if channel is None:
+            channel = await guild.fetch_channel(channel_id_int)
+    except Exception as e:
+        print(f"[Error] 通知用チャンネルの取得失敗 (ID: {channel_id}): {e}")
+        return
+
     if channel:
         ng_words = load_json(NG_WORDS_FILE, [])
         word_list = (
@@ -135,7 +145,7 @@ async def send_ng_list_update(guild: discord.Guild, title_text: str):
         try:
             await channel.send(embed=embed)
         except Exception as e:
-            print(f"[Error] 通知の送信に失敗しました: {e}")
+            print(f"[Error] 通知メッセージの送信に失敗しました: {e}")
 
 
 # ==========================================
@@ -162,13 +172,15 @@ async def on_message(message):
 
     config = get_config()
 
-    # ★ 免除ロールを持っているかチェック
+    # 免除ロールまたは管理者ロールを持っているユーザーはスキップ
     if isinstance(message.author, discord.Member):
         exempt_role_name = config.get("exempt_role_name", "VIP")
         user_role_names = [role.name for role in message.author.roles]
 
-        # 免除ロールを持っている、または管理権限(ADMIN_ROLE_NAME)を持つユーザーはNGワードチェックをスキップ
-        if exempt_role_name in user_role_names or ADMIN_ROLE_NAME in user_role_names:
+        if (
+            exempt_role_name in user_role_names
+            or ADMIN_ROLE_NAME in user_role_names
+        ):
             await bot.process_commands(message)
             return
 
@@ -225,6 +237,63 @@ async def on_message(message):
 # ==========================================
 # 6. スラッシュコマンド機能
 # ==========================================
+
+
+# --- 【一般用】自分の警告回数を確認 ---
+@bot.tree.command(
+    name="my_points", description="自分の現在の警告累積回数を確認します"
+)
+async def my_points(interaction: discord.Interaction):
+    user_points = load_json(POINTS_FILE, {})
+    config = get_config()
+
+    user_id = str(interaction.user.id)
+    current_points = user_points.get(user_id, 0)
+    max_points = config.get("max_points", 3)
+
+    await interaction.response.send_message(
+        f"📊 {interaction.user.mention} さんの現在の警告累積回数は **{current_points} / {max_points} 回** です。",
+        ephemeral=True,  # 実行した本人のみ表示
+    )
+
+
+# --- 【管理者専用】他ユーザーの警告回数を確認 ---
+@bot.tree.command(
+    name="check_points",
+    description="【管理者専用】指定したユーザーの警告累積回数を確認します",
+)
+@has_admin_role()
+async def check_points(interaction: discord.Interaction, user: discord.Member):
+    user_points = load_json(POINTS_FILE, {})
+    config = get_config()
+
+    user_id = str(user.id)
+    current_points = user_points.get(user_id, 0)
+    max_points = config.get("max_points", 3)
+
+    await interaction.response.send_message(
+        f"🔍 {user.mention} さんの現在の警告累積回数は **{current_points} / {max_points} 回** です。",
+        ephemeral=True,
+    )
+
+
+# --- 【管理者専用】警告回数をリセット ---
+@bot.tree.command(
+    name="reset_points",
+    description="【管理者専用】指定したユーザーの警告累積回数を0にリセットします",
+)
+@has_admin_role()
+async def reset_points(interaction: discord.Interaction, user: discord.Member):
+    user_points = load_json(POINTS_FILE, {})
+    user_id = str(user.id)
+
+    user_points[user_id] = 0
+    save_json(POINTS_FILE, user_points)
+
+    await interaction.response.send_message(
+        f"🔄 {user.mention} さんの警告累積回数を 0 回にリセットしました。",
+        ephemeral=True,
+    )
 
 
 # --- NGワード追加 ---
@@ -295,7 +364,7 @@ async def list_ng_words(interaction: discord.Interaction):
     )
 
 
-# --- 免除ロールの設定コマンド (新規追加) ---
+# --- 免除ロールの設定 ---
 @bot.tree.command(
     name="set_exempt_role",
     description="【管理者専用】NGワードの検知対象外（免除）にする役職を設定します",
@@ -415,6 +484,8 @@ async def show_config(interaction: discord.Interaction):
 @toggle_notify.error
 @set_timeout_rules.error
 @show_config.error
+@check_points.error
+@reset_points.error
 async def admin_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ):
