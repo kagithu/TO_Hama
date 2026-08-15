@@ -42,7 +42,7 @@ POINTS_FILE = "user_points.json"
 CONFIG_FILE = "config.json"
 
 # ★ Bot管理用コマンドを実行できるロール名
-ADMIN_ROLE_NAME = "スーパーモデレーター"
+ADMIN_ROLE_NAME = "スーパーモデレーター","モデレーター"
 
 # デフォルト設定値
 DEFAULT_CONFIG = {
