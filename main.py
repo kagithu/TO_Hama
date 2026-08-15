@@ -45,24 +45,24 @@ CONFIG_FILE = "config.json"
 # ★ Bot管理用コマンドを実行できるロール名
 ADMIN_ROLE_NAME = "スーパーモデレーター"
 
-# デフォルト設定値
+# デフォルト設定値（初期状態では免除ロールなし）
 DEFAULT_CONFIG = {
     "max_points": 3,
     "timeout_minutes": 10,
-    "timeout_multiplier": 2.0,  # TO重なるごとの倍率 (1.0で固定長、2.0で2倍化)
+    "timeout_multiplier": 2.0,  # TO重なるごとの倍率
     "notify_channel_id": None,
     "notify_enabled": True,
-    "exempt_role_name": "スーパーモデレーター",
+    "exempt_role_name": None,  # 明示的に設定されるまで免除なし
     "block_user_ids": [],  # 個別ブロック対象のユーザーIDリスト
 }
 
 # 回避に使われやすいノイズ記号・スペースのリスト
 IGNORE_CHARS = [
     " ",
-    " ",
     "。",
-    "、"
+    "、",
     "〇",
+    " ",
     "_",
     "-",
     ".",
@@ -223,21 +223,24 @@ async def on_message(message):
 
     config = get_config()
 
-    # 個別ブロック対象リストを取得
-    block_user_ids = config.get("block_user_ids", [])
+    # ★【修正点1】IDを型（int/str両対応）で確実に判定
+    block_user_ids = [int(uid) for uid in config.get("block_user_ids", [])]
     is_individually_blocked = message.author.id in block_user_ids
 
-    # 免除ロール判定（ただし個別ブロック対象ユーザーは免除させない）
-    if isinstance(message.author, discord.Member):
-        exempt_role_name = config.get("exempt_role_name", "VIP")
-        user_role_names = [role.name for role in message.author.roles]
+    # ★【修正点2】免除・管理者スルー判定ロジックの最優先ガード
+    # 個別ブロックされているユーザーは、管理者ロール・免除ロール・サーバー管理者権限があっても絶対にスルーさせない
+    if not is_individually_blocked:
+        if isinstance(message.author, discord.Member):
+            exempt_role_name = config.get("exempt_role_name")
+            user_role_names = [role.name for role in message.author.roles]
 
-        # 管理者または免除ロール保持者で、かつ個別ブロックされていない場合はスキップ
-        if not is_individually_blocked:
-            if (
-                exempt_role_name in user_role_names
-                or ADMIN_ROLE_NAME in user_role_names
-            ):
+            # 免除判定 (ロール名が一致、または管理用ロール名と一致する場合)
+            is_exempt_role = (
+                exempt_role_name and (exempt_role_name in user_role_names)
+            )
+            is_admin_role = ADMIN_ROLE_NAME in user_role_names
+
+            if is_exempt_role or is_admin_role:
                 await bot.process_commands(message)
                 return
 
@@ -281,14 +284,9 @@ async def on_message(message):
 
         # 規定回数ごとのタイムアウト処理
         if total_points % max_points == 0:
-            # ★ タイムアウト回数（1回目, 2回目, 3回目...）
             timeout_count = total_points // max_points
 
             # 時間計算: 基本時間 * (倍率 ^ (通算TO回数 - 1))
-            # 例 (初期値5分, 倍率2.0の場合):
-            # 1回目 (3違反): 5 * (2^0) = 5分
-            # 2回目 (6違反): 5 * (2^1) = 10分
-            # 3回目 (9違反): 5 * (2^2) = 20分
             calc_minutes = int(base_minutes * (multiplier ** (timeout_count - 1)))
 
             # Discordの上限は28日間（40,320分）
@@ -305,7 +303,7 @@ async def on_message(message):
                 )
             except discord.errors.Forbidden:
                 await message.channel.send(
-                    "❌ タイムアウト権限がないか、対象ユーザーの権限がBotより上位です。"
+                    "❌ タイムアウト権限がないか、対象ユーザーの権限（ロール位置）がBotより上位です。"
                 )
             except Exception as e:
                 print(f"[Error] タイムアウトエラー: {e}")
@@ -326,7 +324,7 @@ async def on_message(message):
 @has_admin_role()
 async def block_user(interaction: discord.Interaction, user: discord.Member):
     config = get_config()
-    block_list = config.get("block_user_ids", [])
+    block_list = [int(uid) for uid in config.get("block_user_ids", [])]
 
     if user.id in block_list:
         await interaction.response.send_message(
@@ -353,7 +351,7 @@ async def block_user(interaction: discord.Interaction, user: discord.Member):
 @has_admin_role()
 async def unblock_user(interaction: discord.Interaction, user: discord.Member):
     config = get_config()
-    block_list = config.get("block_user_ids", [])
+    block_list = [int(uid) for uid in config.get("block_user_ids", [])]
 
     if user.id not in block_list:
         await interaction.response.send_message(
@@ -598,7 +596,7 @@ async def show_config(interaction: discord.Interaction):
     notify_status = (
         "ON (有効)" if config.get("notify_enabled", True) else "OFF (無効)"
     )
-    exempt_role = config.get("exempt_role_name", "未設定")
+    exempt_role = config.get("exempt_role_name") or "未設定"
 
     block_user_ids = config.get("block_user_ids", [])
     if block_user_ids:
