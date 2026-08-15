@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import os
@@ -37,6 +38,8 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     print("[CRITICAL] SUPABASE_URL または SUPABASE_KEY が設定されていません！")
     supabase: Client = None
 else:
+    # URLの末尾スラッシュを除去
+    SUPABASE_URL = SUPABASE_URL.rstrip("/")
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
@@ -48,11 +51,11 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-ADMIN_ROLE_NAME = "モデレーター"
+ADMIN_ROLE_NAME = "スーパーモデレーター"
 
 DEFAULT_CONFIG = {
     "max_points": 3,
-    "timeout_minutes": 5,
+    "timeout_minutes": 10,
     "timeout_multiplier": 2.0,
     "notify_channel_id": None,
     "notify_enabled": True,
@@ -60,7 +63,7 @@ DEFAULT_CONFIG = {
     "block_user_ids": [],
 }
 
-IGNORE_CHARS = [" ", " ", "_", "-", ".", ",", "/", "・", "★", "☆", "〜", "~", "!", "?", "│", "|"]
+IGNORE_CHARS = [" ","。","、","〇", " ", "_", "-", ".", ",", "/", "・", "★", "☆", "〜", "~", "!", "?", "│", "|"]
 
 
 def clean_text(text: str) -> str:
@@ -91,85 +94,90 @@ def has_admin_role():
 
 
 # ==========================================
-# 4. Supabase DB操作ヘルパー関数
+# 4. 非同期対応 Supabase DB操作関数
 # ==========================================
-def get_config():
+async def async_db_run(func, *args, **kwargs):
+    """DB操作でBotのメインスレッドを止めないための非同期ラッパー"""
     if not supabase:
-        return DEFAULT_CONFIG
+        return None
     try:
-        res = supabase.table("bot_config").select("data").eq("id", "main").execute()
-        if res.data:
-            config = res.data[0]["data"]
-            for k, v in DEFAULT_CONFIG.items():
-                if k not in config:
-                    config[k] = v
-            return config
+        return await asyncio.to_thread(func, *args, **kwargs)
     except Exception as e:
-        print(f"[DB Error] config取得失敗: {e}")
+        print(f"[DB Error] {e}")
+        return None
+
+
+def _get_config_sync():
+    res = supabase.table("bot_config").select("data").eq("id", "main").execute()
+    if res.data:
+        config = res.data[0]["data"]
+        for k, v in DEFAULT_CONFIG.items():
+            if k not in config:
+                config[k] = v
+        return config
     return DEFAULT_CONFIG
 
-
-def save_config(config_data):
+async def get_config():
     if not supabase:
-        return
-    try:
-        supabase.table("bot_config").upsert({"id": "main", "data": config_data}).execute()
-    except Exception as e:
-        print(f"[DB Error] config保存失敗: {e}")
+        return DEFAULT_CONFIG
+    res = await async_db_run(_get_config_sync)
+    return res if res else DEFAULT_CONFIG
 
 
-def get_ng_words():
+def _save_config_sync(config_data):
+    supabase.table("bot_config").upsert({"id": "main", "data": config_data}).execute()
+
+async def save_config(config_data):
+    await async_db_run(_save_config_sync, config_data)
+
+
+def _get_ng_words_sync():
+    res = supabase.table("ng_words").select("word").execute()
+    return [row["word"] for row in res.data]
+
+async def get_ng_words():
     if not supabase:
         return []
-    try:
-        res = supabase.table("ng_words").select("word").execute()
-        return [row["word"] for row in res.data]
-    except Exception as e:
-        print(f"[DB Error] NGワード取得失敗: {e}")
-        return []
+    res = await async_db_run(_get_ng_words_sync)
+    return res if res is not None else []
 
 
-def add_ng_word_db(word: str):
-    if not supabase:
-        return
-    try:
-        supabase.table("ng_words").upsert({"word": word}).execute()
-    except Exception as e:
-        print(f"[DB Error] NGワード追加失敗: {e}")
+def _add_ng_word_sync(word):
+    supabase.table("ng_words").upsert({"word": word}).execute()
+
+async def add_ng_word_db(word: str):
+    await async_db_run(_add_ng_word_sync, word)
 
 
-def remove_ng_word_db(word: str):
-    if not supabase:
-        return
-    try:
-        supabase.table("ng_words").delete().eq("word", word).execute()
-    except Exception as e:
-        print(f"[DB Error] NGワード削除失敗: {e}")
+def _remove_ng_word_sync(word):
+    supabase.table("ng_words").delete().eq("word", word).execute()
+
+async def remove_ng_word_db(word: str):
+    await async_db_run(_remove_ng_word_sync, word)
 
 
-def get_user_points(user_id: str) -> int:
-    if not supabase:
-        return 0
-    try:
-        res = supabase.table("user_points").select("points").eq("user_id", str(user_id)).execute()
-        if res.data:
-            return res.data[0]["points"]
-    except Exception as e:
-        print(f"[DB Error] ポイント取得失敗: {e}")
+def _get_user_points_sync(user_id):
+    res = supabase.table("user_points").select("points").eq("user_id", str(user_id)).execute()
+    if res.data:
+        return res.data[0]["points"]
     return 0
 
-
-def set_user_points(user_id: str, points: int):
+async def get_user_points(user_id: str) -> int:
     if not supabase:
-        return
-    try:
-        supabase.table("user_points").upsert({"user_id": str(user_id), "points": points}).execute()
-    except Exception as e:
-        print(f"[DB Error] ポイント保存失敗: {e}")
+        return 0
+    res = await async_db_run(_get_user_points_sync, user_id)
+    return res if res is not None else 0
+
+
+def _set_user_points_sync(user_id, points):
+    supabase.table("user_points").upsert({"user_id": str(user_id), "points": points}).execute()
+
+async def set_user_points(user_id: str, points: int):
+    await async_db_run(_set_user_points_sync, user_id, points)
 
 
 async def send_ng_list_update(guild: discord.Guild, title_text: str):
-    config = get_config()
+    config = await get_config()
     if not config.get("notify_enabled", True):
         return
 
@@ -185,7 +193,7 @@ async def send_ng_list_update(guild: discord.Guild, title_text: str):
         return
 
     if channel:
-        ng_words = get_ng_words()
+        ng_words = await get_ng_words()
         word_list = "\n".join([f"・ {w}" for w in ng_words]) if ng_words else "（現在登録されているNGワードはありません）"
         embed = discord.Embed(
             title=f"📢 {title_text}",
@@ -216,7 +224,7 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    config = get_config()
+    config = await get_config()
     block_user_ids = [int(uid) for uid in config.get("block_user_ids", [])]
     is_individually_blocked = message.author.id in block_user_ids
 
@@ -229,7 +237,7 @@ async def on_message(message):
             await bot.process_commands(message)
             return
 
-    ng_words = get_ng_words()
+    ng_words = await get_ng_words()
     cleaned_message = clean_text(message.content)
     contains_ng_word = False
 
@@ -241,8 +249,9 @@ async def on_message(message):
 
     if contains_ng_word:
         user_id = str(message.author.id)
-        total_points = get_user_points(user_id) + 1
-        set_user_points(user_id, total_points)
+        current_points = await get_user_points(user_id)
+        total_points = current_points + 1
+        await set_user_points(user_id, total_points)
 
         try:
             await message.delete()
@@ -286,67 +295,73 @@ async def on_message(message):
 @bot.tree.command(name="block_user", description="【管理者専用】個別ブロック登録")
 @has_admin_role()
 async def block_user(interaction: discord.Interaction, user: discord.Member):
-    config = get_config()
+    await interaction.response.defer(ephemeral=True)  # 3秒タイムアウト防止
+    config = await get_config()
     block_list = [int(uid) for uid in config.get("block_user_ids", [])]
 
     if user.id in block_list:
-        await interaction.response.send_message(f"{user.mention} は既に個別ブロック対象です。", ephemeral=True)
+        await interaction.followup.send(f"{user.mention} は既に個別ブロック対象です。", ephemeral=True)
         return
 
     block_list.append(user.id)
     config["block_user_ids"] = block_list
-    save_config(config)
+    await save_config(config)
 
-    await interaction.response.send_message(f"🚫 {user.mention} を個別ブロック対象に指定しました。", ephemeral=True)
+    await interaction.followup.send(f"🚫 {user.mention} を個別ブロック対象に指定しました。", ephemeral=True)
 
 
 @bot.tree.command(name="unblock_user", description="【管理者専用】個別ブロック解除")
 @has_admin_role()
 async def unblock_user(interaction: discord.Interaction, user: discord.Member):
-    config = get_config()
+    await interaction.response.defer(ephemeral=True)
+    config = await get_config()
     block_list = [int(uid) for uid in config.get("block_user_ids", [])]
 
     if user.id not in block_list:
-        await interaction.response.send_message(f"{user.mention} はブロック対象ではありません。", ephemeral=True)
+        await interaction.followup.send(f"{user.mention} はブロック対象ではありません。", ephemeral=True)
         return
 
     block_list.remove(user.id)
     config["block_user_ids"] = block_list
-    save_config(config)
+    await save_config(config)
 
-    await interaction.response.send_message(f"✅ {user.mention} の個別ブロックを解除しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ {user.mention} の個別ブロックを解除しました。", ephemeral=True)
 
 
 @bot.tree.command(name="my_points", description="自分の通算警告回数を確認")
 async def my_points(interaction: discord.Interaction):
-    total_points = get_user_points(str(interaction.user.id))
-    await interaction.response.send_message(f"📊 {interaction.user.mention} さんの通算警告回数は **{total_points} 回** です。", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    total_points = await get_user_points(str(interaction.user.id))
+    await interaction.followup.send(f"📊 {interaction.user.mention} さんの通算警告回数は **{total_points} 回** です。", ephemeral=True)
 
 
 @bot.tree.command(name="check_points", description="【管理者専用】指定ユーザーの警告回数確認")
 @has_admin_role()
 async def check_points(interaction: discord.Interaction, user: discord.Member):
-    total_points = get_user_points(str(user.id))
-    await interaction.response.send_message(f"🔍 {user.mention} さんの通算警告回数は **{total_points} 回** です。", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    total_points = await get_user_points(str(user.id))
+    await interaction.followup.send(f"🔍 {user.mention} さんの通算警告回数は **{total_points} 回** です。", ephemeral=True)
 
 
 @bot.tree.command(name="reset_points", description="【管理者専用】警告回数をリセット")
 @has_admin_role()
 async def reset_points(interaction: discord.Interaction, user: discord.Member):
-    set_user_points(str(user.id), 0)
-    await interaction.response.send_message(f"🔄 {user.mention} さんの通算警告回数を 0 回にリセットしました。", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    await set_user_points(str(user.id), 0)
+    await interaction.followup.send(f"🔄 {user.mention} さんの通算警告回数を 0 回にリセットしました。", ephemeral=True)
 
 
 @bot.tree.command(name="add_ng", description="【管理者専用】NGワード追加")
 @has_admin_role()
 async def add_ng_word(interaction: discord.Interaction, word: str):
-    ng_words = get_ng_words()
+    await interaction.response.defer(ephemeral=True)
+    ng_words = await get_ng_words()
     if word in ng_words:
-        await interaction.response.send_message(f"「{word}」はすでに登録されています。", ephemeral=True)
+        await interaction.followup.send(f"「{word}」はすでに登録されています。", ephemeral=True)
         return
 
-    add_ng_word_db(word)
-    await interaction.response.send_message(f"✅ NGワードに「{word}」を追加しました。", ephemeral=True)
+    await add_ng_word_db(word)
+    await interaction.followup.send(f"✅ NGワードに「{word}」を追加しました。", ephemeral=True)
 
     if interaction.guild:
         await send_ng_list_update(interaction.guild, f"NGワードが追加されました（追加: {word}）")
@@ -355,13 +370,14 @@ async def add_ng_word(interaction: discord.Interaction, word: str):
 @bot.tree.command(name="remove_ng", description="【管理者専用】NGワード削除")
 @has_admin_role()
 async def remove_ng_word(interaction: discord.Interaction, word: str):
-    ng_words = get_ng_words()
+    await interaction.response.defer(ephemeral=True)
+    ng_words = await get_ng_words()
     if word not in ng_words:
-        await interaction.response.send_message(f"「{word}」は登録されていません。", ephemeral=True)
+        await interaction.followup.send(f"「{word}」は登録されていません。", ephemeral=True)
         return
 
-    remove_ng_word_db(word)
-    await interaction.response.send_message(f"🗑️ NGワードから「{word}」を削除しました。", ephemeral=True)
+    await remove_ng_word_db(word)
+    await interaction.followup.send(f"🗑️ NGワードから「{word}」を削除しました。", ephemeral=True)
 
     if interaction.guild:
         await send_ng_list_update(interaction.guild, f"NGワードが削除されました（削除: {word}）")
@@ -370,57 +386,62 @@ async def remove_ng_word(interaction: discord.Interaction, word: str):
 @bot.tree.command(name="list_ng", description="登録中のNGワード一覧")
 @has_admin_role()
 async def list_ng_words(interaction: discord.Interaction):
-    ng_words = get_ng_words()
+    await interaction.response.defer(ephemeral=True)
+    ng_words = await get_ng_words()
     if not ng_words:
-        await interaction.response.send_message("現在登録されているNGワードはありません。", ephemeral=True)
+        await interaction.followup.send("現在登録されているNGワードはありません。", ephemeral=True)
         return
 
     word_list = "\n".join([f"・ {w}" for w in ng_words])
-    await interaction.response.send_message(f"📋 **現在のNGワード一覧:**\n{word_list}", ephemeral=True)
+    await interaction.followup.send(f"📋 **現在のNGワード一覧:**\n{word_list}", ephemeral=True)
 
 
 @bot.tree.command(name="set_exempt_role", description="【管理者専用】免除役職の設定")
 @has_admin_role()
 async def set_exempt_role(interaction: discord.Interaction, role: discord.Role):
-    config = get_config()
+    await interaction.response.defer(ephemeral=True)
+    config = await get_config()
     config["exempt_role_name"] = role.name
-    save_config(config)
-    await interaction.response.send_message(f"🛡️ 免除対象役職を **{role.name}** に設定しました。", ephemeral=True)
+    await save_config(config)
+    await interaction.followup.send(f"🛡️ 免除対象役職を **{role.name}** に設定しました。", ephemeral=True)
 
 
 @bot.tree.command(name="set_channel", description="【管理者専用】通知チャンネルの設定")
 @has_admin_role()
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    config = get_config()
+    await interaction.response.defer(ephemeral=True)
+    config = await get_config()
     config["notify_channel_id"] = channel.id
-    save_config(config)
-    await interaction.response.send_message(f"📢 通知チャンネルを {channel.mention} に設定しました。", ephemeral=True)
+    await save_config(config)
+    await interaction.followup.send(f"📢 通知チャンネルを {channel.mention} に設定しました。", ephemeral=True)
 
 
 @bot.tree.command(name="toggle_notify", description="【管理者専用】自動通知のON/OFF")
 @has_admin_role()
 async def toggle_notify(interaction: discord.Interaction, enable: bool):
-    config = get_config()
+    await interaction.response.defer(ephemeral=True)
+    config = await get_config()
     config["notify_enabled"] = enable
-    save_config(config)
+    await save_config(config)
     status_str = "有効（ON）" if enable else "無効（OFF）"
-    await interaction.response.send_message(f"⚙️ 自動通知を **{status_str}** に設定しました。", ephemeral=True)
+    await interaction.followup.send(f"⚙️ 自動通知を **{status_str}** に設定しました。", ephemeral=True)
 
 
 @bot.tree.command(name="set_timeout_rules", description="【管理者専用】タイムアウト規則の設定")
 @has_admin_role()
 async def set_timeout_rules(interaction: discord.Interaction, max_points: int, minutes: int, multiplier: float = 2.0):
+    await interaction.response.defer(ephemeral=True)
     if max_points <= 0 or minutes <= 0 or multiplier < 1.0:
-        await interaction.response.send_message("正しい数値を指定してください。", ephemeral=True)
+        await interaction.followup.send("正しい数値を指定してください。", ephemeral=True)
         return
 
-    config = get_config()
+    config = await get_config()
     config["max_points"] = max_points
     config["timeout_minutes"] = minutes
     config["timeout_multiplier"] = multiplier
-    save_config(config)
+    await save_config(config)
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"⚙️ タイムアウト設定を変更しました：\n"
         f"・ **トリガー:** {max_points}回ごと\n"
         f"・ **初回時間:** {minutes}分\n"
@@ -432,7 +453,8 @@ async def set_timeout_rules(interaction: discord.Interaction, max_points: int, m
 @bot.tree.command(name="show_config", description="【管理者専用】設定確認")
 @has_admin_role()
 async def show_config(interaction: discord.Interaction):
-    config = get_config()
+    await interaction.response.defer(ephemeral=True)
+    config = await get_config()
     channel_id = config.get("notify_channel_id")
     channel_mention = f"<#{channel_id}>" if channel_id else "未設定"
     notify_status = "ON (有効)" if config.get("notify_enabled", True) else "OFF (無効)"
@@ -452,7 +474,7 @@ async def show_config(interaction: discord.Interaction):
         f"・ **通知チャンネル:** {channel_mention}\n"
         f"・ **自動通知機能:** {notify_status}"
     )
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 # ==========================================
