@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from flask import Flask
-from supabase  create_client, Client
+from supabase import create_client, Client
 
 # ==========================================
 # 1. Renderスリープ防止用 Webサーバー (Flask)
