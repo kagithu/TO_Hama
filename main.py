@@ -4,6 +4,7 @@ import json
 import os
 from threading import Thread
 import unicodedata
+import urllib.request
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -38,8 +39,8 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     print("[CRITICAL] SUPABASE_URL または SUPABASE_KEY が設定されていません！")
     supabase: Client = None
 else:
-    # URLの末尾スラッシュを除去
-    SUPABASE_URL = SUPABASE_URL.rstrip("/")
+    # URLの末尾スラッシュ・/rest/v1を除去
+    SUPABASE_URL = SUPABASE_URL.rstrip("/").replace("/rest/v1", "")
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
@@ -131,6 +132,7 @@ async def save_config(config_data):
     await async_db_run(_save_config_sync, config_data)
 
 
+# --- NGワード DB操作 ---
 def _get_ng_words_sync():
     res = supabase.table("ng_words").select("word").execute()
     return [row["word"] for row in res.data]
@@ -141,13 +143,11 @@ async def get_ng_words():
     res = await async_db_run(_get_ng_words_sync)
     return res if res is not None else []
 
-
 def _add_ng_word_sync(word):
     supabase.table("ng_words").upsert({"word": word}).execute()
 
 async def add_ng_word_db(word: str):
     await async_db_run(_add_ng_word_sync, word)
-
 
 def _remove_ng_word_sync(word):
     supabase.table("ng_words").delete().eq("word", word).execute()
@@ -156,6 +156,31 @@ async def remove_ng_word_db(word: str):
     await async_db_run(_remove_ng_word_sync, word)
 
 
+# --- 除外ワード (ホワイトリスト) DB操作 ---
+def _get_exempt_words_sync():
+    res = supabase.table("exempt_words").select("word").execute()
+    return [row["word"] for row in res.data]
+
+async def get_exempt_words():
+    if not supabase:
+        return []
+    res = await async_db_run(_get_exempt_words_sync)
+    return res if res is not None else []
+
+def _add_exempt_word_sync(word):
+    supabase.table("exempt_words").upsert({"word": word}).execute()
+
+async def add_exempt_word_db(word: str):
+    await async_db_run(_add_exempt_word_sync, word)
+
+def _remove_exempt_word_sync(word):
+    supabase.table("exempt_words").delete().eq("word", word).execute()
+
+async def remove_exempt_word_db(word: str):
+    await async_db_run(_remove_exempt_word_sync, word)
+
+
+# --- ユーザーポイント DB操作 ---
 def _get_user_points_sync(user_id):
     res = supabase.table("user_points").select("points").eq("user_id", str(user_id)).execute()
     if res.data:
@@ -167,7 +192,6 @@ async def get_user_points(user_id: str) -> int:
         return 0
     res = await async_db_run(_get_user_points_sync, user_id)
     return res if res is not None else 0
-
 
 def _set_user_points_sync(user_id, points):
     supabase.table("user_points").upsert({"user_id": str(user_id), "points": points}).execute()
@@ -237,8 +261,19 @@ async def on_message(message):
             await bot.process_commands(message)
             return
 
-    ng_words = await get_ng_words()
+    # メッセージテキストの正規化処理
     cleaned_message = clean_text(message.content)
+
+    # --- 1. 除外ワード（ホワイトリスト）のマスク処理 ---
+    exempt_words = await get_exempt_words()
+    for exempt_word in exempt_words:
+        cleaned_exempt = clean_text(exempt_word)
+        if cleaned_exempt and cleaned_exempt in cleaned_message:
+            # 除外ワードが含まれる場合、その部分を伏字(***)に置換して無害化
+            cleaned_message = cleaned_message.replace(cleaned_exempt, "***")
+
+    # --- 2. NGワード判定 ---
+    ng_words = await get_ng_words()
     contains_ng_word = False
 
     for ng_word in ng_words:
@@ -292,10 +327,85 @@ async def on_message(message):
 # ==========================================
 # 6. スラッシュコマンド
 # ==========================================
+
+# --- 除外ワード（ホワイトリスト）操作コマンド ---
+@bot.tree.command(name="add_exempt", description="【管理者専用】除外ワード（誤検知防止用）追加")
+@has_admin_role()
+async def add_exempt_word(interaction: discord.Interaction, word: str):
+    await interaction.response.defer(ephemeral=True)
+    exempt_words = await get_exempt_words()
+    if word in exempt_words:
+        await interaction.followup.send(f"「{word}」はすでに除外リストに登録されています。", ephemeral=True)
+        return
+
+    await add_exempt_word_db(word)
+    await interaction.followup.send(f"🛡️ 除外ワードに「{word}」を追加しました。\n（例: NGワードが含まれていても、「{word}」全体の指定時は検知されなくなります）", ephemeral=True)
+
+
+@bot.tree.command(name="remove_exempt", description="【管理者専用】除外ワード削除")
+@has_admin_role()
+async def remove_exempt_word(interaction: discord.Interaction, word: str):
+    await interaction.response.defer(ephemeral=True)
+    exempt_words = await get_exempt_words()
+    if word not in exempt_words:
+        await interaction.followup.send(f"「{word}」は除外リストに登録されていません。", ephemeral=True)
+        return
+
+    await remove_exempt_word_db(word)
+    await interaction.followup.send(f"🗑️ 除外ワードから「{word}」を削除しました。", ephemeral=True)
+
+
+@bot.tree.command(name="list_exempt", description="登録中の除外ワード一覧")
+@has_admin_role()
+async def list_exempt_words(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    exempt_words = await get_exempt_words()
+    if not exempt_words:
+        await interaction.followup.send("現在登録されている除外ワードはありません。", ephemeral=True)
+        return
+
+    word_list = "\n".join([f"・ {w}" for w in exempt_words])
+    await interaction.followup.send(f"🛡️ **現在の除外ワード（誤検知防止）一覧:**\n{word_list}", ephemeral=True)
+
+
+# --- GitHub一括インポート ---
+@bot.tree.command(name="import_ng", description="【管理者専用】GitHub等のテキストURLからNGワードを一括登録")
+@has_admin_role()
+async def import_ng_words(interaction: discord.Interaction, url: str):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            content = response.read().decode('utf-8')
+    except Exception as e:
+        await interaction.followup.send(f"❌ ファイルの取得に失敗しました: {e}", ephemeral=True)
+        return
+
+    words = [line.strip() for line in content.splitlines() if line.strip()]
+    if not words:
+        await interaction.followup.send("❌ 有効な単語が見つかりませんでした。", ephemeral=True)
+        return
+
+    existing_words = await get_ng_words()
+    added_count = 0
+
+    for word in words:
+        if word not in existing_words:
+            await add_ng_word_db(word)
+            added_count += 1
+
+    msg = f"✅ 一括登録が完了しました！\n・ 取得件数: {len(words)} 件\n・ 新規追加: {added_count} 件"
+    await interaction.followup.send(msg, ephemeral=True)
+
+    if interaction.guild and added_count > 0:
+        await send_ng_list_update(interaction.guild, f"GitHubからNGワードが {added_count} 件追加されました")
+
+
+# --- 通常のNGワード・設定コマンド群 ---
 @bot.tree.command(name="block_user", description="【管理者専用】個別ブロック登録")
 @has_admin_role()
 async def block_user(interaction: discord.Interaction, user: discord.Member):
-    await interaction.response.defer(ephemeral=True)  # 3秒タイムアウト防止
+    await interaction.response.defer(ephemeral=True)
     config = await get_config()
     block_list = [int(uid) for uid in config.get("block_user_ids", [])]
 
