@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from flask import Flask
-from supabase import create_client, Client
+from supabase  create_client, Client
 
 # ==========================================
 # 1. Renderスリープ防止用 Webサーバー (Flask)
@@ -369,10 +369,20 @@ async def list_exempt_words(interaction: discord.Interaction):
 
 
 # --- GitHub一括インポート ---
-@bot.tree.command(name="import_ng", description="【管理者専用】GitHub等のテキストURLからNGワードを一括登録")
+@bot.tree.command(name="import_ng", description="【管理者専用】GitHub等のRaw URL(JSON/テキスト)からNGワードを一括登録")
 @has_admin_role()
 async def import_ng_words(interaction: discord.Interaction, url: str):
     await interaction.response.defer(ephemeral=True)
+    
+    # Raw URLかどうかの簡易チェック
+    if "github.com" in url and "raw.githubusercontent.com" not in url:
+        await interaction.followup.send(
+            "❌ GitHubの通常のページURLが指定されています！\n"
+            "ファイル画面右上の **「Raw」** ボタンを押した後のURL（`https://raw.githubusercontent.com/...`）を指定してください。",
+            ephemeral=True
+        )
+        return
+
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -381,7 +391,16 @@ async def import_ng_words(interaction: discord.Interaction, url: str):
         await interaction.followup.send(f"❌ ファイルの取得に失敗しました: {e}", ephemeral=True)
         return
 
-    words = [line.strip() for line in content.splitlines() if line.strip()]
+    words = []
+    # JSON形式の解析を試みる
+    try:
+        data = json.loads(content)
+        if isinstance(data, list):
+            words = [str(item).strip() for item in data if str(item).strip()]
+    except json.JSONDecodeError:
+        # JSONでない場合は従来通り改行区切りテキストとして解析
+        words = [line.strip() for line in content.splitlines() if line.strip()]
+
     if not words:
         await interaction.followup.send("❌ 有効な単語が見つかりませんでした。", ephemeral=True)
         return
@@ -394,12 +413,11 @@ async def import_ng_words(interaction: discord.Interaction, url: str):
             await add_ng_word_db(word)
             added_count += 1
 
-    msg = f"✅ 一括登録が完了しました！\n・ 取得件数: {len(words)} 件\n・ 新規追加: {added_count} 件"
+    msg = f"✅ 一括登録が完了しました！\n・ 読み込み件数: {len(words)} 件\n・ 新規追加: {added_count} 件"
     await interaction.followup.send(msg, ephemeral=True)
 
     if interaction.guild and added_count > 0:
-        await send_ng_list_update(interaction.guild, f"GitHubからNGワードが {added_count} 件追加されました")
-
+        await send_ng_list_update(interaction.guild, f"NGワードが {added_count} 件追加されました")
 
 # --- 通常のNGワード・設定コマンド群 ---
 @bot.tree.command(name="block_user", description="【管理者専用】個別ブロック登録")
