@@ -154,12 +154,20 @@ async def send_ng_list_update(guild: discord.Guild, title_text: str):
 # ==========================================
 @bot.event
 async def on_ready():
+    # ※ レート制限回避のため、ここでの自動 bot.tree.sync() は行いません
+    print(f"Logged in as: {bot.user.name}")
+
+
+# 手動でコマンドを同期するためのプレフィックスコマンド (!sync)
+@bot.command()
+@commands.is_owner()
+async def sync(ctx):
+    """【Bot所有者専用】スラッシュコマンドをDiscordと同期する"""
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
+        await ctx.send(f"✅ {len(synced)} 個のスラッシュコマンドを同期しました！")
     except Exception as e:
-        print(f"[Error] Sync failed: {e}")
-    print(f"Logged in as: {bot.user.name}")
+        await ctx.send(f"❌ 同期失敗: {e}")
 
 
 @bot.event
